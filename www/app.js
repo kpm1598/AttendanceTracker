@@ -91,6 +91,11 @@ function portalSummaryField(text, labelPattern) {
   var re = new RegExp(labelPattern + '\\s*:?\\s*(\\d+)\\s*\\/\\s*(\\d+)', 'i');
   var m = text.match(re);
   if (m) return { count: parseInt(m[1], 10), total: parseInt(m[2], 10) };
+  /* Real innerText often puts the value on the NEXT line: "Present\n118".
+     [^\S\r\n] is spaces/tabs only, so this pattern cannot skip lines. */
+  var reNl = new RegExp(labelPattern + '[^\\S\\r\\n]*:?[^\\S\\r\\n]*\\r?\\n[^\\S\\r\\n]*(\\d+)\\b', 'i');
+  var mNl = text.match(reNl);
+  if (mNl) return { count: parseInt(mNl[1], 10), total: null };
   var re2 = new RegExp(labelPattern + '\\s*:?\\s*(\\d+)\\b', 'i');
   var m2 = text.match(re2);
   if (m2) return { count: parseInt(m2[1], 10), total: null };
@@ -158,8 +163,14 @@ function parsePortalText(raw) {
   var a = portalSummaryField(text, 'Absent');
   var na = portalSummaryField(text, 'No\\s+Attendance');
   if (p || a || na) {
-    var total = (p && p.total) || (a && a.total) || (na && na.total) ||
-      ((p ? p.count : 0) + (a ? a.count : 0) + (na ? na.count : 0)) || null;
+    var tot = portalSummaryField(text, 'Total');
+    var sumCounts = (p ? p.count : 0) + (a ? a.count : 0) + (na ? na.count : 0);
+    /* Trust an explicit "Total" only when it agrees with the counts (or the
+       counts are incomplete) — a stray "Total" elsewhere must not win. */
+    var totOk = tot && tot.count >= Math.max(p ? p.count : 0, a ? a.count : 0, na ? na.count : 0) &&
+      (!(p && a && na) || tot.count === sumCounts);
+    var total = (totOk ? tot.count : null) || (p && p.total) || (a && a.total) || (na && na.total) ||
+      sumCounts || null;
     result.summary = {
       present: p ? p.count : null,
       absent: a ? a.count : null,
@@ -173,6 +184,26 @@ function parsePortalText(raw) {
   result.loginPage = /GNUMS\s*Login/i.test(text) && /Password/i.test(text) && !result.summary && result.rows.length === 0;
   result.ok = !!result.summary || result.rows.length > 0;
   return result;
+}
+
+var PORTAL_ATTENDANCE_PATH = '/StudentPanel/TTM_Attendance/TTM_Attendance_StudentAttendance.aspx';
+
+/* Classify fetched portal text so the fetch flow knows what it landed on.
+   GNUMS often bounces a cold deep-link to the student dashboard, so a fetch
+   can land on an interior page instead of the attendance page.
+   Returns 'login' | 'attendance' | 'interior' | 'unknown'. Pure. */
+function classifyPortalText(raw) {
+  var text = String(raw == null ? '' : raw);
+  var parsed = parsePortalText(text);
+  if (parsed.loginPage) return 'login';
+  var hasSubjectCodes = /25AM23\d{2}/.test(text);
+  var hasPresentAbsentNums = /\bPresent\b[\s\S]{0,40}?\d/i.test(text) && /\bAbsent\b[\s\S]{0,40}?\d/i.test(text);
+  var hasAttendancePercent = /attendance[\s\S]{0,60}?\d+(?:\.\d+)?\s*%/i.test(text) ||
+    /\d+(?:\.\d+)?\s*%[\s\S]{0,60}?attendance/i.test(text);
+  if (parsed.ok || hasSubjectCodes || hasPresentAbsentNums || hasAttendancePercent) return 'attendance';
+  if (/NOTIFICATION/i.test(text) || /Term\s+Registration/i.test(text) ||
+      /Transport\s+Registration/i.test(text) || /\bDashboard\b/i.test(text)) return 'interior';
+  return 'unknown';
 }
 
 /* ---------- Proof tracking (medical certificate / OD letter / event proof) ---------- */
@@ -332,7 +363,7 @@ function seedEntries() {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { calcPercent: calcPercent, canMiss: canMiss, needInRow: needInRow, BASELINE: BASELINE, SUBJECTS: SUBJECTS, TIMETABLE: TIMETABLE, parsePortalText: parsePortalText, parsePortalRows: parsePortalRows, PORTAL_LOGIN_URL: PORTAL_LOGIN_URL, PROOF_TYPES: PROOF_TYPES, migrateEntry: migrateEntry, loggedSubjectStats: loggedSubjectStats, subjectDangerLevel: subjectDangerLevel, isOverdueProof: isOverdueProof, overdueProofs: overdueProofs, weeklyRange: weeklyRange, weeklyStats: weeklyStats, buildAbsenceReport: buildAbsenceReport, takeBackLabel: takeBackLabel };
+  module.exports = { calcPercent: calcPercent, canMiss: canMiss, needInRow: needInRow, BASELINE: BASELINE, SUBJECTS: SUBJECTS, TIMETABLE: TIMETABLE, parsePortalText: parsePortalText, parsePortalRows: parsePortalRows, classifyPortalText: classifyPortalText, PORTAL_ATTENDANCE_PATH: PORTAL_ATTENDANCE_PATH, PORTAL_LOGIN_URL: PORTAL_LOGIN_URL, PROOF_TYPES: PROOF_TYPES, migrateEntry: migrateEntry, loggedSubjectStats: loggedSubjectStats, subjectDangerLevel: subjectDangerLevel, isOverdueProof: isOverdueProof, overdueProofs: overdueProofs, weeklyRange: weeklyRange, weeklyStats: weeklyStats, buildAbsenceReport: buildAbsenceReport, takeBackLabel: takeBackLabel };
 }
 
 /* ---------- App (browser / Capacitor only) ---------- */
@@ -756,8 +787,21 @@ if (typeof document !== 'undefined') {
   var pendingPortal = null;
   var lastFetchedRaw = '';
   var portalStatusMsg = '';
+  var portalNavHops = 0;        /* menu-navigation hops used in this fetch */
+  var portalNavTimer = null;    /* fallback: re-extract if a hop never loads */
+  var portalAwaitingNav = false;
+  var portalShortRetried = false;
+  var portalConnectUrls = [];   /* URLs seen while the Connect browser is open */
 
   var EXTRACT_CODE = "(function(){try{var parts=[];function add(t){if(t)parts.push(t);}try{add(document.body?document.body.innerText:'');}catch(e){}var frames=document.querySelectorAll('iframe,frame');for(var i=0;i<frames.length;i++){try{var d=frames[i].contentDocument;if(d&&d.body)add(d.body.innerText);}catch(e){}}var text=parts.join('\\n').slice(0,80000);try{if(window.mobileApp&&window.mobileApp.postMessage){var CH=12000;var total=Math.max(1,Math.ceil(text.length/CH));for(var c=0;c<total;c++){window.mobileApp.postMessage({detail:{type:'attendanceTextChunk',index:c,total:total,text:text.slice(c*CH,(c+1)*CH)}});}}}catch(e){}return text;}catch(err){return '';}})();";
+
+  /* Injected when a fetch lands on a portal interior page (e.g. the student
+     dashboard): walk the portal's own menu to the attendance page.
+     1) click an anchor whose href contains 'StudentAttendance',
+     2) else click an anchor/menu element whose text mentions attendance,
+     3) else navigate straight to the attendance path (same origin).
+     Searches the main document and every same-origin frame. */
+  var NAV_CODE = "(function(){function search(doc){try{var as=doc.querySelectorAll('a');var i;for(i=0;i<as.length;i++){var h=as[i].getAttribute('href')||'';if(/StudentAttendance/i.test(h)){as[i].click();return true;}}for(i=0;i<as.length;i++){var t=(as[i].innerText||as[i].textContent||'').trim();if(t&&t.length<80&&/attendance/i.test(t)){as[i].click();return true;}}var els=doc.querySelectorAll('li,span,div,td,button');for(i=0;i<els.length;i++){var tx=(els[i].innerText||els[i].textContent||'').trim();if(tx&&tx.length<60&&/attendance/i.test(tx)&&els[i].children.length===0){els[i].click();return true;}}}catch(e){}return false;}try{if(search(document))return 'clicked';var frames=document.querySelectorAll('iframe,frame');for(var f=0;f<frames.length;f++){try{var d=frames[f].contentDocument;if(d&&search(d))return 'clicked-frame';}catch(e){}}}catch(e){}try{window.location.href=window.location.origin+'/StudentPanel/TTM_Attendance/TTM_Attendance_StudentAttendance.aspx';}catch(e){window.location.href='/StudentPanel/TTM_Attendance/TTM_Attendance_StudentAttendance.aspx';}return 'navigated';})();";
 
   function portalAvailable() { return !!IAB; }
   function ensurePortal() { if (!state.portal) state.portal = defaultPortal(); return state.portal; }
@@ -784,13 +828,27 @@ if (typeof document !== 'undefined') {
   function setupPortalListeners() {
     if (portalListenersReady || !IAB) return;
     portalListenersReady = true;
-    IAB.addListener('urlChangeEvent', function (e) { if (e && e.url) portalCurrentUrl = e.url; });
+    IAB.addListener('urlChangeEvent', function (e) {
+      if (e && e.url) {
+        portalCurrentUrl = e.url;
+        if (portalMode === 'connect') portalConnectUrls.push(e.url);
+      }
+    });
     IAB.addListener('closeEvent', function (e) {
       if (e && e.url) portalCurrentUrl = e.url;
       clearTimeout(portalTimer);
+      clearTimeout(portalNavTimer);
       if (portalMode === 'connect') {
-        if (portalCurrentUrl && !/Login\.aspx/i.test(portalCurrentUrl)) {
-          ensurePortal().learnedUrl = portalCurrentUrl;
+        /* Prefer the last Attendance page seen during this Connect session —
+           the final URL can be a dashboard/menu page the user ended on. */
+        var learned = '';
+        for (var ci = portalConnectUrls.length - 1; ci >= 0; ci--) {
+          if (/attendance/i.test(portalConnectUrls[ci])) { learned = portalConnectUrls[ci]; break; }
+        }
+        var candidate = learned || portalCurrentUrl;
+        portalConnectUrls = [];
+        if (candidate && !/Login\.aspx/i.test(candidate)) {
+          ensurePortal().learnedUrl = candidate;
           saveState(); render();
           toast('Attendance page saved — you are connected');
         } else {
@@ -847,6 +905,7 @@ if (typeof document !== 'undefined') {
     document.getElementById('portalHelpSheet').classList.add('hidden');
     setupPortalListeners();
     portalMode = 'connect';
+    portalConnectUrls = [];
     portalCurrentUrl = PORTAL_LOGIN_URL;
     var r = openPortalBrowser(PORTAL_LOGIN_URL);
     if (r && r.catch) r.catch(function () { portalMode = null; toast('Could not open the portal — check internet'); });
@@ -861,6 +920,10 @@ if (typeof document !== 'undefined') {
     portalMode = 'fetch';
     portalHandled = false;
     portalExtractAttempts = 0;
+    portalNavHops = 0;
+    portalAwaitingNav = false;
+    portalShortRetried = false;
+    clearTimeout(portalNavTimer);
     portalChunks = {}; portalChunkTotal = 0;
     portalCurrentUrl = p.learnedUrl;
     var r = openPortalBrowser(p.learnedUrl);
@@ -874,7 +937,7 @@ if (typeof document !== 'undefined') {
         portalMode = null;
         render();
       }
-    }, 30000);
+    }, 60000); /* 60s: a fetch may need up to 3 menu-navigation hops */
   }
 
   function runPortalExtraction() {
@@ -887,11 +950,28 @@ if (typeof document !== 'undefined') {
     } catch (e) {}
   }
 
+  function runPortalNavigation() {
+    if (portalMode !== 'fetch' || portalHandled || !IAB) return;
+    try {
+      var r = IAB.executeScript({ code: NAV_CODE });
+      if (r && r.catch) r.catch(function () {});
+    } catch (e) {}
+  }
+
   function finishFetch(text) {
     if (portalHandled) return;
+    portalAwaitingNav = false;
+    clearTimeout(portalNavTimer);
     lastFetchedRaw = String(text == null ? '' : text);
-    var parsed = parsePortalText(lastFetchedRaw);
-    if (parsed.loginPage) {
+    /* Frames/pages that render late can return almost no text on the first
+       pass — extract once more after a pause before judging the page. */
+    if (lastFetchedRaw.length < 200 && !portalShortRetried) {
+      portalShortRetried = true;
+      setTimeout(runPortalExtraction, 2500);
+      return;
+    }
+    var cls = classifyPortalText(lastFetchedRaw);
+    if (cls === 'login') {
       portalHandled = true;
       clearTimeout(portalTimer);
       closePortalBrowser();
@@ -901,23 +981,47 @@ if (typeof document !== 'undefined') {
       toast('Session expired — log in again via Connect');
       return;
     }
-    if (!parsed.ok) {
-      if (portalExtractAttempts < 2) { setTimeout(runPortalExtraction, 2500); return; }
-      portalHandled = true;
-      clearTimeout(portalTimer);
-      closePortalBrowser();
-      portalMode = null;
-      portalStatusMsg = "Couldn't read the attendance page. Tap “View fetched text” to see what the portal sent, or use Re-learn to teach the app the page again.";
+    if (cls === 'attendance') {
+      var parsed = parsePortalText(lastFetchedRaw);
+      if (parsed.ok) {
+        portalHandled = true;
+        clearTimeout(portalTimer);
+        closePortalBrowser();
+        portalMode = null;
+        pendingPortal = parsed;
+        showPortalConfirm(parsed);
+        return;
+      }
+      /* Attendance markers but nothing parseable — fall through to the
+         one retry / give-up below. */
+    }
+    if (cls === 'interior' && portalNavHops < 3) {
+      /* GNUMS bounced the deep-link to an interior page (usually the student
+         dashboard). Walk the portal's own menu to the attendance page and
+         extract again when the next page loads. */
+      portalNavHops++;
+      portalAwaitingNav = true;
+      portalStatusMsg = 'Portal opened its dashboard — navigating to the attendance page…';
       render();
-      toast("Couldn't read the attendance page");
+      runPortalNavigation();
+      clearTimeout(portalNavTimer);
+      portalNavTimer = setTimeout(function () {
+        /* The hop produced no page load — re-extract whatever is showing. */
+        if (portalMode === 'fetch' && !portalHandled && portalAwaitingNav) {
+          portalAwaitingNav = false;
+          runPortalExtraction();
+        }
+      }, 6000);
       return;
     }
+    if (cls !== 'interior' && portalExtractAttempts < 2) { setTimeout(runPortalExtraction, 2500); return; }
     portalHandled = true;
     clearTimeout(portalTimer);
     closePortalBrowser();
     portalMode = null;
-    pendingPortal = parsed;
-    showPortalConfirm(parsed);
+    portalStatusMsg = "Couldn't read the attendance page. Tap “View fetched text” to see what the portal sent, or use Re-learn to teach the app the page again.";
+    render();
+    toast("Couldn't read the attendance page");
   }
 
   function isDuplicateRow(r) {

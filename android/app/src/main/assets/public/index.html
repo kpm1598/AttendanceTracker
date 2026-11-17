@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Attendance Tracker</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div>
+    <h1>Attendance Tracker</h1>
+    <p class="sub">Sem 3 · A.Y. 2026-27 Odd · DSU</p>
+  </div>
+  <div class="pct-badge" id="headerPct">76.13%</div>
+</header>
+
+<main>
+  <!-- DASHBOARD -->
+  <section id="view-dashboard" class="view active">
+    <div class="card hero">
+      <div class="hero-row">
+        <div>
+          <div class="big-pct" id="overallPct">76.13%</div>
+          <div class="muted" id="overallCounts">Present 118 · Absent 37 · NA 11</div>
+          <div class="muted small">Baseline 17-Nov-2026 + entries you add in the app. NA is excluded from %.</div>
+        </div>
+      </div>
+      <div class="bar"><div id="overallBar" class="bar-fill"></div></div>
+      <div class="stats-grid">
+        <div class="stat"><span id="statPresent">118</span><label>Present</label></div>
+        <div class="stat"><span id="statAbsent">37</span><label>Absent</label></div>
+        <div class="stat"><span id="statNA">11</span><label>No Attendance</label></div>
+        <div class="stat"><span id="statTotal">166</span><label>Total</label></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Target</h2>
+      <label class="field">Target attendance %
+        <input type="number" id="targetInput" min="1" max="100" step="0.5" value="75">
+      </label>
+      <div class="two-col">
+        <div class="insight"><strong id="canMiss">2</strong><span>classes you can miss &amp; stay at/above target</span></div>
+        <div class="insight"><strong id="needRow">0</strong><span>presents in a row needed to reach target</span></div>
+      </div>
+      <p class="muted small" id="targetHint"></p>
+      <div class="two-col">
+        <div class="insight amber"><strong id="pendingRecoveries">0</strong><span>pending recoveries (Pending / Not checked)</span></div>
+        <div class="insight"><strong id="need80">30</strong><span>presents in a row to reach 80%</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Today's Classes <span class="muted small" id="todayLabel"></span></h2>
+      <div id="todayList"></div>
+    </div>
+
+    <div class="card">
+      <h2>Recent Entries</h2>
+      <div id="recentList"></div>
+    </div>
+
+    <div class="card">
+      <h2>Data</h2>
+      <div class="btn-row">
+        <button class="btn secondary" id="exportBtn">Export JSON</button>
+        <button class="btn secondary" id="copyBtn">Copy JSON</button>
+        <button class="btn danger" id="resetBtn">Reset App Data</button>
+      </div>
+      <p class="muted small">Export downloads a JSON backup of your baseline, target and all entries. Reset restores the original baseline and the 17-Nov seed entries.</p>
+    </div>
+  </section>
+
+  <!-- SUBJECTS -->
+  <section id="view-subjects" class="view">
+    <div id="subjectList"></div>
+    <p class="muted small footer-note">Per-subject % is from your in-app log only — the college portal only gave overall totals (118 / 37 / 11), not per-subject totals.</p>
+  </section>
+
+  <!-- ADD / EDIT -->
+  <section id="view-add" class="view">
+    <div class="card">
+      <h2 id="formTitle">Add Entry</h2>
+      <form id="entryForm">
+        <input type="hidden" id="fId">
+        <label class="field">Date
+          <input type="date" id="fDate" required>
+        </label>
+        <label class="field">Subject
+          <select id="fSubject" required></select>
+        </label>
+        <div class="two-col-fields">
+          <label class="field">Type
+            <select id="fType">
+              <option>Lecture</option>
+              <option>Lab</option>
+            </select>
+          </label>
+          <label class="field">Time (optional)
+            <input type="text" id="fTime" placeholder="e.g. 8:30 AM">
+          </label>
+        </div>
+        <label class="field">Status
+          <select id="fStatus">
+            <option>Present</option>
+            <option>Absent</option>
+            <option>No Attendance</option>
+          </select>
+        </label>
+
+        <div id="absenceFields" class="hidden">
+          <hr>
+          <h3>Absence details</h3>
+          <label class="field">Reason category
+            <select id="fReasonCategory">
+              <option>Not noted yet</option>
+              <option>Sick</option>
+              <option>Travel</option>
+              <option>Overslept</option>
+              <option>Personal/Family</option>
+              <option>College event/Hackathon</option>
+              <option>Other</option>
+            </select>
+          </label>
+          <label class="field">Reason note
+            <textarea id="fReasonNote" rows="2" placeholder="What happened that day?"></textarea>
+          </label>
+          <h3>Will I get attendance back?</h3>
+          <label class="field">Recovery status
+            <select id="fRecoveryStatus">
+              <option>Not checked yet</option>
+              <option>Pending - applied</option>
+              <option>Will get it back</option>
+              <option>Won't get it back</option>
+            </select>
+          </label>
+          <label class="field">Recovery type
+            <select id="fRecoveryType">
+              <option>Other</option>
+              <option>OD</option>
+              <option>Medical leave</option>
+              <option>Faculty correction</option>
+            </select>
+          </label>
+          <label class="field">Recovery note / follow-up
+            <textarea id="fRecoveryNote" rows="2" placeholder="e.g. Applied for OD, waiting for HOD sign"></textarea>
+          </label>
+        </div>
+
+        <p class="muted small hidden" id="baselineNote">This entry is part of the 17-Nov baseline — it does not double-count in the overall %.</p>
+        <div class="btn-row">
+          <button type="submit" class="btn primary">Save Entry</button>
+          <button type="button" class="btn secondary hidden" id="cancelEditBtn">Cancel Edit</button>
+          <button type="button" class="btn danger hidden" id="deleteEntryBtn">Delete</button>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <!-- ABSENCES -->
+  <section id="view-absences" class="view">
+    <div class="chips" id="absenceFilters">
+      <button class="chip active" data-filter="all">All</button>
+      <button class="chip" data-filter="pending">Pending / Not checked</button>
+      <button class="chip" data-filter="will">Will get back</button>
+      <button class="chip" data-filter="wont">Won't get back</button>
+    </div>
+    <div id="absenceList"></div>
+  </section>
+
+  <!-- TIMETABLE -->
+  <section id="view-timetable" class="view">
+    <div class="chips" id="dayTabs"></div>
+    <div class="card"><div id="timetableList"></div></div>
+    <p class="muted small footer-note">Sunday: no classes. Library, Self Study, Office Hour and Mentorship are not subjects and are excluded.</p>
+  </section>
+</main>
+
+<div id="toast" class="toast hidden"></div>
+
+<nav class="bottom-nav">
+  <button data-nav="dashboard" class="active"><span>🏠</span>Dashboard</button>
+  <button data-nav="subjects"><span>📚</span>Subjects</button>
+  <button data-nav="add"><span>➕</span>Add</button>
+  <button data-nav="absences"><span>❌</span>Absences</button>
+  <button data-nav="timetable"><span>🗓️</span>Timetable</button>
+</nav>
+
+<script src="app.js"></script>
+</body>
+</html>

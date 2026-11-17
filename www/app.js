@@ -102,12 +102,82 @@ function portalSummaryField(text, labelPattern) {
   return null;
 }
 
-function portalPercent(text, summary) {
-  var matches = text.match(/(\d+(?:\.\d+)?)\s*%/g) || [];
-  for (var i = 0; i < matches.length; i++) {
-    var v = parseFloat(matches[i]);
-    if (v > 0 && v <= 100) return Math.round(v * 100) / 100;
+/* The real GNUMS Attendance Summary page renders stat cards with the NUMBER
+   ABOVE its label ("155\nTotal Slots"); other arrangements put the label
+   first. Stacked cards are ambiguous one pair at a time (in label-first
+   layout each value also sits above the NEXT card's label), so the cards
+   are parsed as a set: build both direction assignments and keep the one
+   where Total = Present + Absent (falling back to the assignment that
+   found more cards, then to number-above-label, the real page's layout).
+   Returns {Total, Present, Absent, 'No Attendance'} with nulls. Pure. */
+function portalSlotsCards(text) {
+  var labelRe = /(Total|Present|Absent|No\s+Attendance)\s+Slots?\b/gi;
+  var occ = [];
+  var m;
+  while ((m = labelRe.exec(text)) !== null) {
+    var kind = /^total$/i.test(m[1]) ? 'Total'
+      : /^present$/i.test(m[1]) ? 'Present'
+      : /^absent$/i.test(m[1]) ? 'Absent' : 'No Attendance';
+    occ.push({ kind: kind, start: m.index, end: m.index + m[0].length });
   }
+  function adjacent(oc) {
+    var before = text.slice(0, oc.start);
+    var bm = before.match(/(\d+)([\s:.\-–—]*)$/);
+    var after = text.slice(oc.end);
+    var am = after.match(/^[\s:.\-–—]*?(\d+)/);
+    return { above: bm ? parseInt(bm[1], 10) : null, below: am ? parseInt(am[1], 10) : null };
+  }
+  var aboveA = {}, belowA = {};
+  occ.forEach(function (oc) {
+    var adj = adjacent(oc);
+    if (aboveA[oc.kind] == null && adj.above != null) aboveA[oc.kind] = adj.above;
+    if (belowA[oc.kind] == null && adj.below != null) belowA[oc.kind] = adj.below;
+  });
+  function stats(a) {
+    var kinds = ['Total', 'Present', 'Absent', 'No Attendance'];
+    var n = kinds.filter(function (k) { return a[k] != null; }).length;
+    var consistent = a.Total != null && a.Present != null && a.Absent != null &&
+      a.Total === a.Present + a.Absent;
+    return { n: n, consistent: consistent };
+  }
+  var sa = stats(aboveA), sb = stats(belowA);
+  var chosen;
+  if (sa.consistent !== sb.consistent) chosen = sa.consistent ? aboveA : belowA;
+  else if (sa.n !== sb.n) chosen = sa.n > sb.n ? aboveA : belowA;
+  else chosen = aboveA; /* the real page: number above label */
+  return {
+    Total: chosen.Total != null ? chosen.Total : null,
+    Present: chosen.Present != null ? chosen.Present : null,
+    Absent: chosen.Absent != null ? chosen.Absent : null,
+    'No Attendance': chosen['No Attendance'] != null ? chosen['No Attendance'] : null
+  };
+}
+/* One Slots card value by label pattern ('Total', 'Present', 'Absent',
+   'No\\s+Attendance'), or null when the page has no such card. Pure. */
+function portalSlotsField(text, labelPattern) {
+  var kind = labelPattern.replace(/\\s\+/g, ' ');
+  var cards = portalSlotsCards(text);
+  return cards[kind] != null ? cards[kind] : null;
+}
+
+function portalPercent(text, summary) {
+  var raw = text.match(/(\d+(?:\.\d+)?)\s*%/g) || [];
+  var candidates = [];
+  raw.forEach(function (mm) {
+    var v = parseFloat(mm);
+    if (v > 0 && v <= 100) candidates.push(Math.round(v * 100) / 100);
+  });
+  /* When Present/Absent are known, the right % is the one that equals
+     100*P/(P+A) — other % values on the page (menus, other widgets)
+     must not win just because they appear first. */
+  if (summary && summary.present != null && summary.absent != null && (summary.present + summary.absent) > 0) {
+    var expected = Math.round(calcPercent(summary.present, summary.absent) * 100) / 100;
+    for (var i = 0; i < candidates.length; i++) {
+      if (Math.abs(candidates[i] - expected) <= 0.05) return candidates[i];
+    }
+    if (!candidates.length) return expected;
+  }
+  if (candidates.length) return candidates[0];
   if (summary && summary.present != null && summary.absent != null) {
     return Math.round(calcPercent(summary.present, summary.absent) * 100) / 100;
   }
@@ -159,22 +229,39 @@ function parsePortalRows(text) {
 function parsePortalText(raw) {
   var text = String(raw == null ? '' : raw);
   var result = { loginPage: false, summary: null, rows: [], ok: false };
-  var p = portalSummaryField(text, 'Present');
-  var a = portalSummaryField(text, 'Absent');
-  var na = portalSummaryField(text, 'No\\s+Attendance');
+  /* The Attendance Summary page's Slots cards win over the generic label
+     patterns: "Total Slots" is the COUNTED total (Present + Absent) and
+     No Attendance is a separate card — unlike the old screenshots, whose
+     "Total" (166) included NA. */
+  var slotsP = portalSlotsField(text, 'Present');
+  var slotsA = portalSlotsField(text, 'Absent');
+  var slotsNa = portalSlotsField(text, 'No\\s+Attendance');
+  var slotsT = portalSlotsField(text, 'Total');
+  var p = slotsP != null ? { count: slotsP, total: null } : portalSummaryField(text, 'Present');
+  var a = slotsA != null ? { count: slotsA, total: null } : portalSummaryField(text, 'Absent');
+  var na = slotsNa != null ? { count: slotsNa, total: null } : portalSummaryField(text, 'No\\s+Attendance');
+  /* On the Slots page a missing No-Attendance card means 0, not unknown. */
+  if ((slotsP != null || slotsA != null || slotsT != null) && !na) na = { count: 0, total: null };
   if (p || a || na) {
-    var tot = portalSummaryField(text, 'Total');
+    var tot = slotsT != null ? null : portalSummaryField(text, 'Total');
     var sumCounts = (p ? p.count : 0) + (a ? a.count : 0) + (na ? na.count : 0);
     /* Trust an explicit "Total" only when it agrees with the counts (or the
        counts are incomplete) — a stray "Total" elsewhere must not win. */
     var totOk = tot && tot.count >= Math.max(p ? p.count : 0, a ? a.count : 0, na ? na.count : 0) &&
       (!(p && a && na) || tot.count === sumCounts);
-    var total = (totOk ? tot.count : null) || (p && p.total) || (a && a.total) || (na && na.total) ||
+    var genericTotal = (totOk ? tot.count : null) || (p && p.total) || (a && a.total) || (na && na.total) ||
       sumCounts || null;
+    /* Counted total EXCLUDES NA: Total Slots when the page gave it, else
+       Present + Absent, else the generic total with NA taken back out. */
+    var countedTotal = slotsT != null ? slotsT
+      : (p && a ? p.count + a.count
+        : (genericTotal != null ? genericTotal - (na ? na.count : 0) : null));
+    var total = countedTotal != null ? countedTotal + (na ? na.count : 0) : genericTotal;
     result.summary = {
       present: p ? p.count : null,
       absent: a ? a.count : null,
       na: na ? na.count : null,
+      countedTotal: countedTotal,
       total: total,
       percent: null
     };
@@ -184,6 +271,127 @@ function parsePortalText(raw) {
   result.loginPage = /GNUMS\s*Login/i.test(text) && /Password/i.test(text) && !result.summary && result.rows.length === 0;
   result.ok = !!result.summary || result.rows.length > 0;
   return result;
+}
+
+/* ---------- Absent Days tab parser — pure, node-testable ----------
+   The portal's "Absent Days" tab lists absences date-wise and subject-wise,
+   but its exact markup is unknown, so this is defensive: find date tokens
+   and associate subject references on the same line or the few lines after
+   a date. Subjects match by code (25AM23xx) or by name/short-form alias. */
+var ABSENT_DAY_ALIASES = [
+  { code: '25AM2306', alias: 'AI for Embedded Systems' },
+  { code: '25AM2306', alias: 'AI for Embedded' },
+  { code: '25AM2301', alias: 'Probability & Statistics' },
+  { code: '25AM2301', alias: 'Probability and Statistics' },
+  { code: '25AM2301', alias: 'Probability' },
+  { code: '25AM2302', alias: 'Data Structures' },
+  { code: '25AM2303', alias: 'Principles of Database Management' },
+  { code: '25AM2303', alias: 'Database Management' },
+  { code: '25AM2303', alias: 'Database' },
+  { code: '25AM2303', alias: 'DBMS' },
+  { code: '25AM2304', alias: 'Artificial Intelligence' },
+  { code: '25AM2304', alias: 'AI' },
+  { code: '25AM2305', alias: 'Computer Organization and Architecture' },
+  { code: '25AM2305', alias: 'Computer Organization & Architecture' },
+  { code: '25AM2305', alias: 'Computer Organization' },
+  { code: '25AM2305', alias: 'COA' },
+  { code: '25AM2306', alias: 'Embedded Systems' },
+  { code: '25AM2306', alias: 'Embedded' },
+  { code: '25AM2307', alias: 'Java Programming' },
+  { code: '25AM2307', alias: 'Java' },
+  { code: '25AM2308', alias: 'Cognitive and Technical Skills' },
+  { code: '25AM2308', alias: 'Cognitive & Technical Skills' },
+  { code: '25AM2308', alias: 'Technical Skills' },
+  { code: '25AM2308', alias: 'Cognitive' },
+  { code: '25AM2308', alias: 'CTS' }
+];
+function escapeRegExp(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+/* Subject codes mentioned in one line of text, in order, no duplicates.
+   Longest alias wins on overlap (so "AI for Embedded Systems" is 2306
+   only, not also 2304 via the bare "AI" inside it). */
+function subjectsInLine(line) {
+  var found = [];
+  var codeRe = /25AM23\d{2}/g, cm;
+  while ((cm = codeRe.exec(line)) !== null) {
+    var code = cm[0].toUpperCase();
+    if (SUBJECTS.some(function (s) { return s.code === code; })) {
+      found.push({ start: cm.index, end: cm.index + cm[0].length, code: code });
+    }
+  }
+  ABSENT_DAY_ALIASES.forEach(function (a) {
+    var re = new RegExp('\\b' + escapeRegExp(a.alias) + '\\b', 'gi');
+    var m;
+    while ((m = re.exec(line)) !== null) {
+      found.push({ start: m.index, end: m.index + m[0].length, code: a.code });
+    }
+  });
+  found.sort(function (x, y) { return (x.start - y.start) || ((y.end - y.start) - (x.end - x.start)); });
+  var codes = [], taken = [];
+  found.forEach(function (f) {
+    var overlaps = taken.some(function (t) { return f.start < t.end && t.start < f.end; });
+    if (overlaps) return;
+    taken.push(f);
+    if (codes.indexOf(f.code) < 0) codes.push(f.code);
+  });
+  return codes;
+}
+/* First date token in a line: dd-MMM-yyyy, dd MMM yyyy, dd/MM/yyyy or
+   dd-MM-yyyy (day-first). Returns ISO 'yyyy-mm-dd' or null. */
+function absentDayDateInLine(line) {
+  var m = line.match(/(\d{1,2})[-\s](Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-\s,]+(\d{4})/i);
+  if (m) {
+    var monKey = m[2].charAt(0).toUpperCase() + m[2].slice(1, 3).toLowerCase();
+    var mm = PORTAL_MONTHS[monKey];
+    var dd = parseInt(m[1], 10), yy = parseInt(m[3], 10);
+    if (mm && dd >= 1 && dd <= 31) return yy + '-' + String(mm).padStart(2, '0') + '-' + String(dd).padStart(2, '0');
+    return null;
+  }
+  m = line.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/) || line.match(/(\d{1,2})-(\d{1,2})-(\d{4})/);
+  if (m) {
+    var d2 = parseInt(m[1], 10), m2 = parseInt(m[2], 10), y2 = parseInt(m[3], 10);
+    if (m2 >= 1 && m2 <= 12 && d2 >= 1 && d2 <= 31) {
+      return y2 + '-' + String(m2).padStart(2, '0') + '-' + String(d2).padStart(2, '0');
+    }
+  }
+  return null;
+}
+function parseAbsentDaysText(raw) {
+  var text = String(raw == null ? '' : raw);
+  var lines = text.split(/\r?\n/);
+  var rows = [];
+  var seen = {};
+  var currentDate = null, linesSinceDate = 999;
+  function emit(date, code) {
+    var key = date + '|' + code;
+    if (seen[key]) return;
+    seen[key] = true;
+    rows.push({ date: date, slotIndex: null, subjectCode: code, time: '', type: '', status: 'Absent', absentDay: true });
+  }
+  lines.forEach(function (line) {
+    var d = absentDayDateInLine(line);
+    var codes = subjectsInLine(line);
+    if (d) {
+      currentDate = d; linesSinceDate = 0;
+      codes.forEach(function (c) { emit(d, c); });
+    } else {
+      linesSinceDate++;
+      /* Subject-only lines just under a date belong to that date. */
+      if (currentDate && linesSinceDate <= 5) codes.forEach(function (c) { emit(currentDate, c); });
+    }
+  });
+  return rows;
+}
+/* Would importing this portal row duplicate an existing entry? Pure so the
+   rule is node-testable; the app delegates to it. Absent Days rows carry no
+   slot/time, so for them the same subject already logged that day (any
+   slot) counts as a duplicate. */
+function portalRowDuplicate(entries, r) {
+  return (entries || []).some(function (e) {
+    if (!e || e.date !== r.date) return false;
+    if (r.absentDay) return e.subjectCode === r.subjectCode;
+    if (e.slotIndex != null && r.slotIndex != null && Number(e.slotIndex) === Number(r.slotIndex)) return true;
+    return e.subjectCode === r.subjectCode && (e.time || '') === (r.time || '');
+  });
 }
 
 var PORTAL_ATTENDANCE_PATH = '/StudentPanel/TTM_Attendance/TTM_Attendance_StudentAttendance.aspx';
@@ -196,6 +404,12 @@ function classifyPortalText(raw) {
   var text = String(raw == null ? '' : raw);
   var parsed = parsePortalText(text);
   if (parsed.loginPage) return 'login';
+  /* The Attendance Summary page is unmistakable (Slots cards / its title
+     next to a %) — classify it as attendance even if the full parse failed,
+     so a fetch never tries to navigate AWAY from the real page. */
+  var hasSlotsCards = /\bTotal\s+Slots\b/i.test(text) || /\bPresent\s+Slots\b/i.test(text);
+  var hasSummaryTitlePct = /Attendance\s+Summary/i.test(text) && /\d+(?:\.\d+)?\s*%/.test(text);
+  if (hasSlotsCards || hasSummaryTitlePct) return 'attendance';
   var hasSubjectCodes = /25AM23\d{2}/.test(text);
   var hasPresentAbsentNums = /\bPresent\b[\s\S]{0,40}?\d/i.test(text) && /\bAbsent\b[\s\S]{0,40}?\d/i.test(text);
   var hasAttendancePercent = /attendance[\s\S]{0,60}?\d+(?:\.\d+)?\s*%/i.test(text) ||
@@ -363,7 +577,7 @@ function seedEntries() {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { calcPercent: calcPercent, canMiss: canMiss, needInRow: needInRow, BASELINE: BASELINE, SUBJECTS: SUBJECTS, TIMETABLE: TIMETABLE, parsePortalText: parsePortalText, parsePortalRows: parsePortalRows, classifyPortalText: classifyPortalText, PORTAL_ATTENDANCE_PATH: PORTAL_ATTENDANCE_PATH, PORTAL_LOGIN_URL: PORTAL_LOGIN_URL, PROOF_TYPES: PROOF_TYPES, migrateEntry: migrateEntry, loggedSubjectStats: loggedSubjectStats, subjectDangerLevel: subjectDangerLevel, isOverdueProof: isOverdueProof, overdueProofs: overdueProofs, weeklyRange: weeklyRange, weeklyStats: weeklyStats, buildAbsenceReport: buildAbsenceReport, takeBackLabel: takeBackLabel };
+  module.exports = { calcPercent: calcPercent, canMiss: canMiss, needInRow: needInRow, BASELINE: BASELINE, SUBJECTS: SUBJECTS, TIMETABLE: TIMETABLE, parsePortalText: parsePortalText, parsePortalRows: parsePortalRows, portalSlotsField: portalSlotsField, parseAbsentDaysText: parseAbsentDaysText, portalRowDuplicate: portalRowDuplicate, classifyPortalText: classifyPortalText, PORTAL_ATTENDANCE_PATH: PORTAL_ATTENDANCE_PATH, PORTAL_LOGIN_URL: PORTAL_LOGIN_URL, PROOF_TYPES: PROOF_TYPES, migrateEntry: migrateEntry, loggedSubjectStats: loggedSubjectStats, subjectDangerLevel: subjectDangerLevel, isOverdueProof: isOverdueProof, overdueProofs: overdueProofs, weeklyRange: weeklyRange, weeklyStats: weeklyStats, buildAbsenceReport: buildAbsenceReport, takeBackLabel: takeBackLabel };
 }
 
 /* ---------- App (browser / Capacitor only) ---------- */
@@ -407,12 +621,18 @@ if (typeof document !== 'undefined') {
     if (snap && snap.present != null && snap.absent != null) {
       return {
         present: snap.present, absent: snap.absent, na: snap.na || 0,
+        /* countedTotal EXCLUDES NA — it is the only total the % maths may
+           use as a denominator (via present+absent). total is incl. NA and
+           is display-only. Older snapshots have no countedTotal stored;
+           derive it from present + absent. */
+        countedTotal: snap.countedTotal != null ? snap.countedTotal : (snap.present + snap.absent),
         total: snap.total || (snap.present + snap.absent + (snap.na || 0)),
         pct: snap.percent != null ? snap.percent : calcPercent(snap.present, snap.absent),
         fromPortal: true, fetchedAt: snap.fetchedAt || null
       };
     }
     var s = overallStats();
+    s.countedTotal = s.present + s.absent;
     s.fromPortal = false; s.fetchedAt = null;
     return s;
   }
@@ -791,7 +1011,11 @@ if (typeof document !== 'undefined') {
   var portalNavTimer = null;    /* fallback: re-extract if a hop never loads */
   var portalAwaitingNav = false;
   var portalShortRetried = false;
+  var portalSlotsRetried = false; /* attendance page seen but Slots cards not captured yet */
   var portalConnectUrls = [];   /* URLs seen while the Connect browser is open */
+  var portalPhase = 'main';     /* 'main' (summary page) | 'absent' (Absent Days tab) */
+  var lastAbsentRaw = '';       /* raw text of the Absent Days capture */
+  var portalAbsentTimer = null; /* fallback: settle summary-only if the tab step stalls */
 
   var EXTRACT_CODE = "(function(){try{var parts=[];function add(t){if(t)parts.push(t);}try{add(document.body?document.body.innerText:'');}catch(e){}var frames=document.querySelectorAll('iframe,frame');for(var i=0;i<frames.length;i++){try{var d=frames[i].contentDocument;if(d&&d.body)add(d.body.innerText);}catch(e){}}var text=parts.join('\\n').slice(0,80000);try{if(window.mobileApp&&window.mobileApp.postMessage){var CH=12000;var total=Math.max(1,Math.ceil(text.length/CH));for(var c=0;c<total;c++){window.mobileApp.postMessage({detail:{type:'attendanceTextChunk',index:c,total:total,text:text.slice(c*CH,(c+1)*CH)}});}}}catch(e){}return text;}catch(err){return '';}})();";
 
@@ -802,6 +1026,12 @@ if (typeof document !== 'undefined') {
      3) else navigate straight to the attendance path (same origin).
      Searches the main document and every same-origin frame. */
   var NAV_CODE = "(function(){function search(doc){try{var as=doc.querySelectorAll('a');var i;for(i=0;i<as.length;i++){var h=as[i].getAttribute('href')||'';if(/StudentAttendance/i.test(h)){as[i].click();return true;}}for(i=0;i<as.length;i++){var t=(as[i].innerText||as[i].textContent||'').trim();if(t&&t.length<80&&/attendance/i.test(t)){as[i].click();return true;}}var els=doc.querySelectorAll('li,span,div,td,button');for(i=0;i<els.length;i++){var tx=(els[i].innerText||els[i].textContent||'').trim();if(tx&&tx.length<60&&/attendance/i.test(tx)&&els[i].children.length===0){els[i].click();return true;}}}catch(e){}return false;}try{if(search(document))return 'clicked';var frames=document.querySelectorAll('iframe,frame');for(var f=0;f<frames.length;f++){try{var d=frames[f].contentDocument;if(d&&search(d))return 'clicked-frame';}catch(e){}}}catch(e){}try{window.location.href=window.location.origin+'/StudentPanel/TTM_Attendance/TTM_Attendance_StudentAttendance.aspx';}catch(e){window.location.href='/StudentPanel/TTM_Attendance/TTM_Attendance_StudentAttendance.aspx';}return 'navigated';})();";
+
+  /* Injected on the Attendance Summary page: find the "Absent Days" tab
+     (main document + same-origin frames), click it, and report back via
+     postMessage whether it was found. The tab switch may be a postback
+     (new page load) or an in-page render — the fetch flow handles both. */
+  var ABSENT_TAB_CODE = "(function(){function pass(doc,sel){try{var els=doc.querySelectorAll(sel);for(var i=0;i<els.length;i++){var t=(els[i].innerText||els[i].textContent||'').trim();if(t==='Absent Days'||(t.indexOf('Absent Days')===0&&t.length<40)){els[i].click();return true;}}}catch(e){}return false;}function search(doc){return pass(doc,'a,li,button,[role=tab]')||pass(doc,'span,div,td');}var found=false;try{if(search(document))found=true;else{var frames=document.querySelectorAll('iframe,frame');for(var f=0;f<frames.length;f++){try{var d=frames[f].contentDocument;if(d&&search(d)){found=true;break;}}catch(e){}}}}catch(e){}try{if(window.mobileApp&&window.mobileApp.postMessage)window.mobileApp.postMessage({detail:{type:'absentTab',found:found}});}catch(e){}return found;})();";
 
   function portalAvailable() { return !!IAB; }
   function ensurePortal() { if (!state.portal) state.portal = defaultPortal(); return state.portal; }
@@ -818,7 +1048,7 @@ if (typeof document !== 'undefined') {
         '<div class="stat"><span>' + s.absent + '</span><label>Absent (portal)</label></div>' +
         '<div class="stat"><span>' + (s.na || 0) + '</span><label>NA (portal)</label></div>' +
         '<div class="stat"><span>' + (s.percent != null ? Number(s.percent).toFixed(2) + '%' : '—') + '</span><label>Portal %</label></div></div>' +
-        '<p class="muted small">Portal total ' + (s.total || (s.present + s.absent + (s.na || 0))) + ' · fetched ' + fmtTime(s.fetchedAt) + '. This snapshot is the headline % above.</p>';
+        '<p class="muted small">Portal counted total ' + (s.countedTotal != null ? s.countedTotal : (s.present + s.absent)) + ' (' + (s.total || (s.present + s.absent + (s.na || 0))) + ' incl. NA) · fetched ' + fmtTime(s.fetchedAt) + '. This snapshot is the headline % above.</p>';
     } else {
       snapEl.innerHTML = '<p class="muted small">No portal snapshot yet. Connect once, then Fetch — the portal totals will become your headline %.</p>';
     }
@@ -865,6 +1095,9 @@ if (typeof document !== 'undefined') {
     });
     IAB.addListener('pageLoadError', function () {
       if (portalMode === 'fetch' && !portalHandled) {
+        /* A failed Absent Days postback must not lose the summary that was
+           already captured — settle with the summary only. */
+        if (portalPhase === 'absent') { settleAbsentDays(); return; }
         portalHandled = true;
         clearTimeout(portalTimer);
         closePortalBrowser();
@@ -878,6 +1111,17 @@ if (typeof document !== 'undefined') {
       var d = (e && e.detail) || {};
       var payload = d.detail || d;
       if (!payload) return;
+      if (payload.type === 'absentTab') {
+        if (!payload.found) { settleAbsentDays(); return; }
+        /* Found and clicked: a postback load will trigger extraction via
+           browserPageLoaded; an in-page render will not, so extract after
+           ~3s either way. settleAbsentDays' guard makes doubles harmless. */
+        clearTimeout(portalAbsentTimer);
+        portalAbsentTimer = setTimeout(function () {
+          if (portalMode === 'fetch' && !portalHandled && portalPhase === 'absent') runPortalExtraction();
+        }, 3000);
+        return;
+      }
       if (payload.type === 'attendanceText' && typeof payload.text === 'string') {
         finishFetch(payload.text);
       } else if (payload.type === 'attendanceTextChunk' && typeof payload.text === 'string') {
@@ -923,7 +1167,11 @@ if (typeof document !== 'undefined') {
     portalNavHops = 0;
     portalAwaitingNav = false;
     portalShortRetried = false;
+    portalSlotsRetried = false;
+    portalPhase = 'main';
+    lastAbsentRaw = '';
     clearTimeout(portalNavTimer);
+    clearTimeout(portalAbsentTimer);
     portalChunks = {}; portalChunkTotal = 0;
     portalCurrentUrl = p.learnedUrl;
     var r = openPortalBrowser(p.learnedUrl);
@@ -937,7 +1185,7 @@ if (typeof document !== 'undefined') {
         portalMode = null;
         render();
       }
-    }, 60000); /* 60s: a fetch may need up to 3 menu-navigation hops */
+    }, 90000); /* 90s: up to 3 menu-navigation hops + the Absent Days tab step */
   }
 
   function runPortalExtraction() {
@@ -958,10 +1206,72 @@ if (typeof document !== 'undefined') {
     } catch (e) {}
   }
 
+  function runAbsentTabClick() {
+    if (portalMode !== 'fetch' || portalHandled || !IAB) return;
+    try {
+      var r = IAB.executeScript({ code: ABSENT_TAB_CODE });
+      if (r && r.catch) r.catch(function () {});
+    } catch (e) {}
+  }
+
+  /* Summary captured. Before finishing, also read the portal's Absent Days
+     tab (date-wise, subject-wise absences). If anything in this step fails,
+     settleAbsentDays() falls back to the summary-only result. */
+  function beginAbsentDaysStep() {
+    portalPhase = 'absent';
+    portalShortRetried = false; /* the tab capture gets its own short-text retry */
+    portalStatusMsg = 'Summary read — opening the Absent Days tab…';
+    render();
+    runAbsentTabClick();
+    clearTimeout(portalAbsentTimer);
+    portalAbsentTimer = setTimeout(function () {
+      if (portalMode === 'fetch' && !portalHandled && portalPhase === 'absent') settleAbsentDays();
+    }, 8000);
+  }
+
+  function settleAbsentDays() {
+    if (portalHandled || portalPhase !== 'absent') return;
+    portalHandled = true;
+    clearTimeout(portalTimer);
+    clearTimeout(portalAbsentTimer);
+    closePortalBrowser();
+    portalMode = null;
+    portalPhase = 'main';
+    if (pendingPortal) showPortalConfirm(pendingPortal);
+  }
+
+  /* Raw-text viewer content: both captures, labelled, when a fetch read
+     the Absent Days tab as well as the summary page. */
+  function combinedFetchedText() {
+    if (!lastFetchedRaw && !lastAbsentRaw) return '(Nothing fetched yet in this session.)';
+    var t = '— Summary page —\n' + (lastFetchedRaw || '(none)');
+    if (lastAbsentRaw) t += '\n\n— Absent Days page —\n' + lastAbsentRaw;
+    return t;
+  }
+
   function finishFetch(text) {
     if (portalHandled) return;
     portalAwaitingNav = false;
     clearTimeout(portalNavTimer);
+    if (portalPhase === 'absent') {
+      /* This capture is the Absent Days tab. Parse its absences into the
+         pending result and finish — the summary-only success stands even
+         if nothing parses here. */
+      lastAbsentRaw = String(text == null ? '' : text);
+      if (lastAbsentRaw.length < 200 && !portalShortRetried) {
+        portalShortRetried = true;
+        setTimeout(runPortalExtraction, 2500);
+        return;
+      }
+      if (pendingPortal && classifyPortalText(lastAbsentRaw) !== 'login') {
+        parseAbsentDaysText(lastAbsentRaw).forEach(function (r) {
+          var already = pendingPortal.rows.some(function (x) { return x.date === r.date && x.subjectCode === r.subjectCode; });
+          if (!already) pendingPortal.rows.push(r);
+        });
+      }
+      settleAbsentDays();
+      return;
+    }
     lastFetchedRaw = String(text == null ? '' : text);
     /* Frames/pages that render late can return almost no text on the first
        pass — extract once more after a pause before judging the page. */
@@ -984,12 +1294,22 @@ if (typeof document !== 'undefined') {
     if (cls === 'attendance') {
       var parsed = parsePortalText(lastFetchedRaw);
       if (parsed.ok) {
-        portalHandled = true;
-        clearTimeout(portalTimer);
-        closePortalBrowser();
-        portalMode = null;
+        /* Summary is in — keep the browser open and read the Absent Days
+           tab too; settleAbsentDays() shows the confirm sheet. */
         pendingPortal = parsed;
-        showPortalConfirm(parsed);
+        beginAbsentDaysStep();
+        return;
+      }
+      /* On the real attendance page but the Slots cards have not rendered
+         into the text yet — wait ~2s and extract once more before giving up. */
+      var hasSlotsNums = portalSlotsField(lastFetchedRaw, 'Total') != null ||
+        portalSlotsField(lastFetchedRaw, 'Present') != null ||
+        portalSlotsField(lastFetchedRaw, 'Absent') != null;
+      if (!portalSlotsRetried && !hasSlotsNums) {
+        portalSlotsRetried = true;
+        portalStatusMsg = 'Attendance page found — reading the summary cards…';
+        render();
+        setTimeout(runPortalExtraction, 2000);
         return;
       }
       /* Attendance markers but nothing parseable — fall through to the
@@ -1024,13 +1344,7 @@ if (typeof document !== 'undefined') {
     toast("Couldn't read the attendance page");
   }
 
-  function isDuplicateRow(r) {
-    return state.entries.some(function (e) {
-      if (e.date !== r.date) return false;
-      if (e.slotIndex != null && Number(e.slotIndex) === r.slotIndex) return true;
-      return e.subjectCode === r.subjectCode && (e.time || '') === (r.time || '');
-    });
-  }
+  function isDuplicateRow(r) { return portalRowDuplicate(state.entries, r); }
   function countNewRows(rows) { return rows.filter(function (r) { return !isDuplicateRow(r); }).length; }
 
   function showPortalConfirm(parsed) {
@@ -1040,7 +1354,8 @@ if (typeof document !== 'undefined') {
       txt = 'Portal says — Present ' + (s.present != null ? s.present : '—') +
         ' / Absent ' + (s.absent != null ? s.absent : '—') +
         ' / NA ' + (s.na != null ? s.na : '—') +
-        ' / Total ' + (s.total != null ? s.total : '—') +
+        ' / Counted total ' + (s.countedTotal != null ? s.countedTotal : '—') +
+        ' / Total incl. NA ' + (s.total != null ? s.total : '—') +
         ' / ' + (s.percent != null ? Number(s.percent).toFixed(2) + '%' : '—');
     } else {
       txt = 'Portal summary was not on the page (dated rows only).';
@@ -1064,7 +1379,8 @@ if (typeof document !== 'undefined') {
         present: sm.present,
         absent: sm.absent,
         na: sm.na || 0,
-        total: sm.total || (sm.present + sm.absent + (sm.na || 0)),
+        countedTotal: sm.countedTotal != null ? sm.countedTotal : (sm.present + sm.absent),
+        total: sm.total != null ? sm.total : ((sm.countedTotal != null ? sm.countedTotal : (sm.present + sm.absent)) + (sm.na || 0)),
         percent: sm.percent != null ? sm.percent : Math.round(calcPercent(sm.present, sm.absent) * 100) / 100,
         fetchedAt: nowIso
       };
@@ -1189,7 +1505,7 @@ if (typeof document !== 'undefined') {
   });
   document.getElementById('portalRawToggle').addEventListener('click', function () {
     var pre = document.getElementById('portalRaw');
-    pre.textContent = lastFetchedRaw || '(Nothing fetched yet in this session.)';
+    pre.textContent = combinedFetchedText();
     pre.classList.toggle('hidden');
   });
 

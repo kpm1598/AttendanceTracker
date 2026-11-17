@@ -1,1 +1,6 @@
-[]
+[
+	{
+		"pkg": "@capgo/inappbrowser",
+		"classpath": "ee.forgr.capacitor_inappbrowser.InAppBrowserPlugin"
+	}
+]

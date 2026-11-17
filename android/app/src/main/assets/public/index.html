@@ -23,7 +23,7 @@
         <div>
           <div class="big-pct" id="overallPct">76.13%</div>
           <div class="muted" id="overallCounts">Present 118 · Absent 37 · NA 11</div>
-          <div class="muted small">Baseline 17-Nov-2026 + entries you add in the app. NA is excluded from %.</div>
+          <div class="muted small" id="overallSource">Baseline 17-Nov-2026 + entries you add in the app. NA is excluded from %.</div>
         </div>
       </div>
       <div class="bar"><div id="overallBar" class="bar-fill"></div></div>
@@ -51,9 +51,47 @@
       </div>
     </div>
 
+    <div class="card proofs-jump" id="proofsToSubmitCard">
+      <h2>Proofs to submit</h2>
+      <div class="insight amber"><strong id="proofsToSubmit">0</strong><span>absences that can be taken back but whose proof is not submitted yet — tap to view them</span></div>
+    </div>
+
+    <div class="card alert hidden" id="proofOverdueCard">
+      <h2>Proof deadline</h2>
+      <p class="small" id="proofOverdueText" style="margin:0"></p>
+    </div>
+
+    <div class="card warn hidden" id="subjectDangerCard">
+      <h2>⚠ Subjects below target</h2>
+      <div id="subjectDangerList"></div>
+    </div>
+
+    <div class="card" id="portalCard">
+      <h2>College Sync (DSU Portal)</h2>
+      <p class="small" style="margin:0 0 4px"><strong id="portalState">Not connected</strong></p>
+      <p class="muted small" id="portalLastFetch" style="margin:0 0 8px">Last fetch: never</p>
+      <div id="portalSnapshot"></div>
+      <p class="small" id="portalMsg"></p>
+      <div class="btn-row">
+        <button class="btn secondary" id="portalConnectBtn">Connect / Log in</button>
+        <button class="btn secondary" id="portalFetchBtn">Fetch Attendance Now</button>
+      </div>
+      <div class="btn-row">
+        <button class="btn secondary" id="portalRelearnBtn">Re-learn Attendance Page</button>
+        <button class="btn secondary" id="portalRawToggle">View fetched text</button>
+      </div>
+      <pre id="portalRaw" class="rawbox hidden"></pre>
+      <p class="muted small">Your password is only ever typed into the college's own login page inside the in-app browser — the app never sees or stores it. The portal is under maintenance daily 11:55 PM–12:30 AM.</p>
+    </div>
+
     <div class="card">
       <h2>Today's Classes <span class="muted small" id="todayLabel"></span></h2>
       <div id="todayList"></div>
+    </div>
+
+    <div class="card">
+      <h2>Weekly Summary</h2>
+      <div id="weeklySummary"></div>
     </div>
 
     <div class="card">
@@ -68,7 +106,7 @@
         <button class="btn secondary" id="copyBtn">Copy JSON</button>
         <button class="btn danger" id="resetBtn">Reset App Data</button>
       </div>
-      <p class="muted small">Export downloads a JSON backup of your baseline, target and all entries. Reset restores the original baseline and the 17-Nov seed entries.</p>
+      <p class="muted small">Export downloads a JSON backup of your baseline, target, all entries and your College Sync (portal) state. Reset restores the original baseline and the 17-Nov seed entries and clears the portal connection.</p>
     </div>
   </section>
 
@@ -146,6 +184,18 @@
           <label class="field">Recovery note / follow-up
             <textarea id="fRecoveryNote" rows="2" placeholder="e.g. Applied for OD, waiting for HOD sign"></textarea>
           </label>
+          <h3>Proof (to claim the attendance back)</h3>
+          <label class="field">Proof type
+            <select id="fProofType">
+              <option>None</option>
+              <option>Medical certificate</option>
+              <option>OD letter</option>
+              <option>Event proof</option>
+              <option>Other</option>
+            </select>
+          </label>
+          <div class="kv-row"><span>Proof ready?</span><button type="button" class="toggle-chip off" id="fProofReady">Ready: No</button></div>
+          <div class="kv-row"><span>Proof submitted?</span><button type="button" class="toggle-chip off" id="fProofSubmitted">Submitted: No</button></div>
         </div>
 
         <p class="muted small hidden" id="baselineNote">This entry is part of the 17-Nov baseline — it does not double-count in the overall %.</p>
@@ -160,10 +210,21 @@
 
   <!-- ABSENCES -->
   <section id="view-absences" class="view">
+    <div id="absenceSummary"></div>
+    <div class="card">
+      <h2>Absence Report</h2>
+      <div class="btn-row">
+        <button class="btn secondary" id="exportReportBtn">Export Report (.txt)</button>
+        <button class="btn secondary" id="copyReportBtn">Copy Report</button>
+      </div>
+      <p class="muted small">A clean text report of every absence — date-wise, with reason, can-it-be-taken-back status and proof ready / submitted — to show or send to faculty.</p>
+    </div>
     <div class="chips" id="absenceFilters">
       <button class="chip active" data-filter="all">All</button>
-      <button class="chip" data-filter="pending">Pending / Not checked</button>
-      <button class="chip" data-filter="will">Will get back</button>
+      <button class="chip" data-filter="takeback">Can be taken back</button>
+      <button class="chip" data-filter="pending">Pending decision</button>
+      <button class="chip" data-filter="proofPending">Proof not submitted</button>
+      <button class="chip" data-filter="proofSubmitted">Proof submitted</button>
       <button class="chip" data-filter="wont">Won't get back</button>
     </div>
     <div id="absenceList"></div>
@@ -176,6 +237,35 @@
     <p class="muted small footer-note">Sunday: no classes. Library, Self Study, Office Hour and Mentorship are not subjects and are excluded.</p>
   </section>
 </main>
+
+<!-- College Sync: connect instructions -->
+<div id="portalHelpSheet" class="sheet hidden">
+  <div class="sheet-inner">
+    <h3>Connect your DSU portal</h3>
+    <ol class="small steps">
+      <li>Log in with <strong>Role = Student</strong> (your usual portal username &amp; password — typed only into the college's own page).</li>
+      <li>From the portal menu, open your <strong>Attendance</strong> page — the date-wise P / A table.</li>
+      <li>Close the portal browser with its <strong>X</strong> button — the app remembers that page and can fetch it by itself from then on.</li>
+    </ol>
+    <div class="btn-row">
+      <button class="btn primary" id="portalHelpOpen">Open Portal Login</button>
+      <button class="btn secondary" id="portalHelpCancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- College Sync: confirm fetched data before applying -->
+<div id="portalConfirmSheet" class="sheet hidden">
+  <div class="sheet-inner">
+    <h3>Apply portal attendance?</h3>
+    <p class="small" id="portalConfirmText"></p>
+    <p class="muted small">Nothing is changed until you tap Apply. New absent rows will appear in your Absence Log for you to add reasons.</p>
+    <div class="btn-row">
+      <button class="btn primary" id="portalApplyBtn">Apply</button>
+      <button class="btn secondary" id="portalDiscardBtn">Discard</button>
+    </div>
+  </div>
+</div>
 
 <div id="toast" class="toast hidden"></div>
 
